@@ -1,0 +1,20 @@
+@0000
+// $E000: LDX #$55
+A2 55
+// $E002: STX $8000
+8E 00 80
+// $E005: LDX #$AA
+A2 AA
+// $E007: STX $8000
+8E 00 80
+// $E00A: JMP $E000
+4C 00 E0
+
+// Vectors (Memory end $FFFA - $FFFF range, ROM offset $1FFA)
+@1FFC
+// Reset Vector LSB ($FFFC) -> $00
+00
+// Reset Vector MSB ($FFFD) -> $E0 (=> Reset $E000)
+E0
+// IRQ Vector ($FFFE)
+00 00
