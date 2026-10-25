@@ -40,12 +40,15 @@ module n6502_soc (
       .bus_ack    (cpu_ack),
       .irq_n      (irq_n),
       .nmi_n      (nmi_n),
+      /* verilator lint_off PINCONNECTEMPTY */
       .dbg_pc     (),
       .dbg_a      (),
       .dbg_x      (),
       .dbg_y      (),
       .dbg_sp     (),
-      .dbg_p      ()
+      .dbg_p      (),
+      .dbg_illegal()
+      /* verilator lint_on PINCONNECTEMPTY */
    );
 
    // ************************************************************************
@@ -57,6 +60,7 @@ module n6502_soc (
    wire ram_sel  = (cpu_addr < 16'h4000);
    wire rom_sel  = (cpu_addr >= 16'hE000);
    wire gpio_sel = (cpu_addr == 16'h8000);
+   wire none_sel = ~(ram_sel | rom_sel | gpio_sel);
 
    wire ram_stb  = cpu_stb & ram_sel;
    wire rom_stb  = cpu_stb & rom_sel;
@@ -76,9 +80,11 @@ module n6502_soc (
                       8'hEA; // Return NOP ($EA) for unmapped memory space
 
    // MUX Acknowledge
+   // Unmapped space acks immediately so the CPU never stalls on it
    assign cpu_ack = (ram_sel & ram_ack) |
                     (rom_sel & rom_ack) |
-                    (gpio_sel & gpio_ack);
+                    (gpio_sel & gpio_ack) |
+                    (none_sel & cpu_stb);
 
    // ************************************************************************
    // RAM Module (16 KB)

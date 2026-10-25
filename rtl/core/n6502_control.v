@@ -41,7 +41,9 @@ module n6502_control (
    input  wire [ 2:0] dec_reg_dst,
    input  wire        dec_mem_read,
    input  wire        dec_mem_write,
-   input  wire [ 7:0] dec_flag_mask,
+   /* verilator lint_off UNUSEDSIGNAL */
+   input  wire [ 7:0] dec_flag_mask, // Bits [5:2] unused: B/D/I set by dedicated opcodes
+   /* verilator lint_on UNUSEDSIGNAL */
    input  wire        dec_is_branch,
    input  wire        dec_is_stack,
    input  wire        dec_is_jump,
@@ -60,7 +62,8 @@ module n6502_control (
    output wire [ 7:0] dbg_x,
    output wire [ 7:0] dbg_y,
    output wire [ 7:0] dbg_sp,
-   output wire [ 7:0] dbg_p
+   output wire [ 7:0] dbg_p,
+   output wire        dbg_illegal
 );
 
    // ****************************************************************
@@ -84,7 +87,6 @@ module n6502_control (
    reg [7:0]  temp_data;
    reg [15:0] target_addr;
    reg [15:0] ptr_addr;
-   reg        rti_got_pcl; // Tracks RTI state: 0=next read is PCL, 1=next read is PCH
 
    // ****************************************************************
    // State Encoding
@@ -101,46 +103,55 @@ module n6502_control (
       S_IND_LO        = 5'd8,
       S_IND_HI        = 5'd9,
       S_PUSH          = 5'd10,
-      S_PULL_WAIT     = 5'd11,
-      S_PULL_READ     = 5'd12,
-      S_JSR_PUSH_PCH  = 5'd13,
-      S_JSR_PUSH_PCL  = 5'd14,
-      S_JSR_JUMP      = 5'd15,
-      S_RTS_PCL       = 5'd16,
-      S_RTS_PCH       = 5'd17,
-      S_INT_PUSH_PCH  = 5'd18,
-      S_INT_PUSH_PCL  = 5'd19,
-      S_INT_PUSH_P    = 5'd20,
-      S_INT_VEC_LO    = 5'd21,
-      S_INT_VEC_HI    = 5'd22,
-      S_RTI_P         = 5'd23,
-      S_RTI_PCL       = 5'd24,
-      S_RTI_PCH       = 5'd25,
+      S_PULL_READ     = 5'd11,
+      S_JSR_PUSH_PCL  = 5'd12,
+      S_JSR_JUMP      = 5'd13,
+      S_RET_P         = 5'd14,
+      S_RET_PCL       = 5'd15,
+      S_RET_PCH       = 5'd16,
+      S_INT_PUSH_PCL  = 5'd17,
+      S_INT_PUSH_P    = 5'd18,
+      S_INT_VEC_LO    = 5'd19,
+      S_INT_VEC_HI    = 5'd20,
       S_ERROR         = 5'd31;
 
    reg [4:0] state;
 
-   // Decoder input
-   assign dec_opcode = (state == S_FETCH && bus_stb && bus_ack) ? bus_rdata : opcode_reg;
+   // Halted on an illegal opcode (held until reset)
+   assign dbg_illegal = (state == S_ERROR);
+
+   // Decoder input: decode from the latched opcode only. S_FETCH uses no
+   // decoder outputs, so a bus_rdata bypass would only lengthen paths.
+   assign dec_opcode = opcode_reg;
 
    // ****************************************************************
    // Interrupt Tracking
    // ****************************************************************
+   reg [1:0] nmi_sync, irq_sync; // 2-FF synchronizers, pins may be asynchronous
    reg nmi_last, nmi_pending, irq_pending, is_software_int;
-   reg nmi_ack; // Set by FSM to acknowledge (clear) a pending NMI
+   reg int_is_nmi; // Vector chosen for the current sequence, latched in S_INT_VEC_LO
+
+   // Acknowledge in the same cycle the NMI vector high byte is taken,
+   // so the next S_FETCH no longer sees the NMI as pending
+   wire nmi_ack = (state == S_INT_VEC_HI) && bus_stb && bus_ack &&
+                  bus_addr[0] && int_is_nmi;
 
    always @(posedge clk) begin
       if (!rst_n) begin
+         nmi_sync    <= 2'b11;
+         irq_sync    <= 2'b11;
          nmi_last    <= 1'b1;
          nmi_pending <= 1'b0;
          irq_pending <= 1'b0;
       end else begin
-         nmi_last <= nmi_n;
-         if (nmi_ack)
+         nmi_sync <= {nmi_sync[0], nmi_n};
+         irq_sync <= {irq_sync[0], irq_n};
+         nmi_last <= nmi_sync[1];
+         if (nmi_last && !nmi_sync[1])
+            nmi_pending <= 1'b1; // A new edge wins over a simultaneous acknowledge
+         else if (nmi_ack)
             nmi_pending <= 1'b0;
-         else if (nmi_last && !nmi_n)
-            nmi_pending <= 1'b1;
-         irq_pending <= !irq_n;
+         irq_pending <= !irq_sync[1];
       end
    end
 
@@ -214,8 +225,9 @@ module n6502_control (
    end
    endtask
 
-   // JSR helper
-   wire [15:0] pc_minus_1 = reg_pc - 16'h0001;
+   // JSR / BRK helpers
+   wire [ 7:0] jsr_ret_pcl = reg_pc[7:0] - 8'h01; // Low byte of PC-1 (last JSR byte)
+   wire [15:0] pc_plus_1   = reg_pc + 16'h0001;
 
    // Store data selection
    reg [7:0] store_data;
@@ -241,9 +253,7 @@ module n6502_control (
          reg_p    <= 8'h34;
          bus_stb  <= 1'b0;
          bus_we   <= 1'b0;
-         nmi_ack  <= 1'b0;
       end else begin
-         nmi_ack <= 1'b0; // Default: pulse signal, only asserted in S_INT_VEC_HI
          case (state)
 
          // ****************************************************************
@@ -278,10 +288,10 @@ module n6502_control (
             if (bus_stb && bus_ack) begin
                // Check for pending interrupts before decoding
                if (nmi_pending || (irq_pending && !reg_p[`FLAG_I])) begin
-                  // Interrupt hijack
+                  // Interrupt hijack: drop opcode, pre-launch PCH push
                   is_software_int <= 1'b0;
-                  bus_stb         <= 1'b0;
-                  state           <= S_INT_PUSH_PCH;
+                  pre_write({8'h01, reg_sp}, reg_pc[15:8]);
+                  state           <= S_INT_PUSH_PCL;
                end else begin
                   // Latch opcode and advance PC
                   opcode_reg <= bus_rdata;
@@ -307,37 +317,32 @@ module n6502_control (
 
                // *** Stack Operations ***
                end else if (dec_is_stack) begin
-                  bus_stb <= 1'b0;
                   if (dec_reg_src == `REG_A || dec_reg_src == `REG_P) begin
                      // PHA/PHP pre-launch stack write
                      pre_write({8'h01, reg_sp},
                                (dec_reg_src == `REG_A) ? reg_a : (reg_p | 8'h30));
                      state <= S_PUSH;
                   end else begin
-                     // PLA/PLP dummy + pull
+                     // PLA/PLP pre-launch pull from SP+1
                      reg_sp <= reg_sp + 1'b1;
-                     state  <= S_PULL_WAIT;
+                     pre_read({8'h01, reg_sp + 1'b1});
+                     state  <= S_PULL_READ;
                   end
 
                // *** BRK ***
                end else if (dec_is_brk) begin
-                  bus_stb         <= 1'b0;
-                  reg_pc          <= reg_pc + 1'b1; // BRK skips padding byte
+                  // Skip padding byte, pre-launch push of PC+2 high byte
+                  reg_pc          <= pc_plus_1;
                   is_software_int <= 1'b1;
-                  state           <= S_INT_PUSH_PCH;
+                  pre_write({8'h01, reg_sp}, pc_plus_1[15:8]);
+                  state           <= S_INT_PUSH_PCL;
 
                // *** RTS / RTI ***
                end else if (dec_is_return) begin
-                  bus_stb     <= 1'b0;
-                  reg_sp      <= reg_sp + 1'b1;
-                  rti_got_pcl <= 1'b0;
-                  if (opcode_reg == 8'h60) begin
-                     // RTS: pre-launch pull PCL
-                     state <= S_RTS_PCL;
-                  end else begin
-                     // RTI: pre-launch pull P
-                     state <= S_RTI_P;
-                  end
+                  // Pre-launch first pull (P for RTI, PCL for RTS) from SP+1
+                  reg_sp <= reg_sp + 1'b1;
+                  pre_read({8'h01, reg_sp + 1'b1});
+                  state  <= (opcode_reg == 8'h40) ? S_RET_P : S_RET_PCL;
 
                // *** Implied / Accumulator ***
                end else if (dec_addr_mode == `AM_IMP || dec_addr_mode == `AM_ACC) begin
@@ -452,10 +457,11 @@ module n6502_control (
                      reg_pc <= {bus_rdata, target_addr[7:0]};
                      state  <= S_FETCH;
                   end else if (dec_is_jsr) begin
-                     // JSR: save target, push return address
+                     // JSR: save target, pre-launch push of return address
+                     // high byte (PC still points at the last JSR byte)
                      target_addr <= {bus_rdata, target_addr[7:0]};
-                     bus_stb     <= 1'b0;
-                     state       <= S_JSR_PUSH_PCH;
+                     pre_write({8'h01, reg_sp}, reg_pc[15:8]);
+                     state       <= S_JSR_PUSH_PCL;
                   end else if (dec_mem_read) begin
                      pre_read({bus_rdata, target_addr[7:0]});
                      state <= S_EXEC;
@@ -615,12 +621,6 @@ module n6502_control (
             end
          end
 
-         S_PULL_WAIT: begin
-            // Pre-launch read from new SP
-            pre_read({8'h01, reg_sp});
-            state <= S_PULL_READ;
-         end
-
          S_PULL_READ: begin
             if (bus_stb && bus_ack) begin
                temp_data <= bus_rdata;
@@ -633,18 +633,12 @@ module n6502_control (
 
          // ****************************************************************
          // JSR: Push PC-1 (return addr), jump to target
-         // Flow: PUSH_PCH -> PUSH_PCL -> JUMP
+         // Flow: FETCH_HI (PCH push launched) -> PUSH_PCL -> JUMP
          // ****************************************************************
-         S_JSR_PUSH_PCH: begin
-            // Pre-launch write of PCH to stack
-            pre_write({8'h01, reg_sp}, pc_minus_1[15:8]);
-            state <= S_JSR_PUSH_PCL;
-         end
-
          S_JSR_PUSH_PCL: begin
             if (bus_stb && bus_ack) begin
                // Pre-launch write of PCL to stack
-               pre_write({8'h01, reg_sp - 1'b1}, pc_minus_1[7:0]);
+               pre_write({8'h01, reg_sp - 1'b1}, jsr_ret_pcl);
                reg_sp <= reg_sp - 1'b1;
                state  <= S_JSR_JUMP;
             end
@@ -661,35 +655,50 @@ module n6502_control (
          end
 
          // ****************************************************************
-         // RTS: Pull PCL, Pull PCH, PC = {PCH,PCL} + 1
-         // Flow: RTS_PCL -> RTS_PCH -> FETCH
+         // RTS / RTI: Pull [P], PCL, PCH
+         // Flow: DECODE (first pull launched) -> [RET_P, RTI only] -> RET_PCL
+         //       -> RET_PCH -> FETCH
+         // Each RET_* state receives the named byte and pre-launches the next.
          // ****************************************************************
-         S_RTS_PCL: begin
-            // Pre-launch read from current SP
-            pre_read({8'h01, reg_sp});
-            state <= S_RTS_PCH;
+         S_RET_P: begin
+            if (bus_stb && bus_ack) begin
+               // Restore P (bit 5 always 1, B-flag preserved from CPU)
+               reg_p  <= {bus_rdata[7:6], 1'b1, reg_p[4], bus_rdata[3:0]};
+               reg_sp <= reg_sp + 1'b1;
+               pre_read({8'h01, reg_sp + 1'b1});
+               state  <= S_RET_PCL;
+            end
          end
 
-         S_RTS_PCH: begin
+         S_RET_PCL: begin
             if (bus_stb && bus_ack) begin
-               // Got PCL
                temp_data <= bus_rdata;
                reg_sp    <= reg_sp + 1'b1;
-               // Pre-launch read of PCH from new SP
                pre_read({8'h01, reg_sp + 1'b1});
-               // Go to shared PCH-read state
-               state     <= S_RTI_PCH;
+               state     <= S_RET_PCH;
+            end
+         end
+
+         S_RET_PCH: begin
+            if (bus_stb && bus_ack) begin
+               if (opcode_reg == 8'h40) begin
+                  // RTI: resume at the pulled address
+                  reg_pc <= {bus_rdata, temp_data};
+                  pre_read({bus_rdata, temp_data});
+               end else begin
+                  // RTS: pulled address is the last JSR byte, resume after it
+                  reg_pc <= {bus_rdata, temp_data} + 16'h0001;
+                  pre_read({bus_rdata, temp_data} + 16'h0001);
+               end
+               state <= S_FETCH;
             end
          end
 
          // ****************************************************************
          // Interrupt Sequence (NMI, IRQ, BRK)
+         // Flow: FETCH/DECODE (PCH push launched) -> PUSH_PCL -> PUSH_P
+         //       -> VEC_LO -> VEC_HI -> FETCH
          // ****************************************************************
-         S_INT_PUSH_PCH: begin
-            pre_write({8'h01, reg_sp}, reg_pc[15:8]);
-            state <= S_INT_PUSH_PCL;
-         end
-
          S_INT_PUSH_PCL: begin
             if (bus_stb && bus_ack) begin
                pre_write({8'h01, reg_sp - 1'b1}, reg_pc[7:0]);
@@ -711,6 +720,8 @@ module n6502_control (
             if (bus_stb && bus_ack) begin
                reg_sp         <= reg_sp - 1'b1;
                reg_p[`FLAG_I] <= 1'b1;
+               // Latch vector choice; an NMI arriving later stays pending
+               int_is_nmi     <= nmi_pending;
                pre_read(nmi_pending ? 16'hFFFA : 16'hFFFE);
                state <= S_INT_VEC_HI;
             end
@@ -721,57 +732,12 @@ module n6502_control (
                if (bus_addr[0] == 1'b0) begin
                   // Read vector low byte
                   temp_data <= bus_rdata;
-                  pre_read(nmi_pending ? 16'hFFFB : 16'hFFFF);
+                  pre_read(int_is_nmi ? 16'hFFFB : 16'hFFFF);
                end else begin
-                  // Read vector high byte
+                  // Read vector high byte (nmi_ack clears a taken NMI)
                   reg_pc  <= {bus_rdata, temp_data};
-                  nmi_ack <= nmi_pending;
                   pre_read({bus_rdata, temp_data});
                   state   <= S_FETCH;
-               end
-            end
-         end
-
-         // ****************************************************************
-         // RTI: Pull P, Pull PCL, Pull PCH
-         // Flow: RTI_P -> RTI_PCL -> RTI_PCH -> FETCH
-         // ****************************************************************
-         S_RTI_P: begin
-            // Pre-launch read P from current SP
-            pre_read({8'h01, reg_sp});
-            state <= S_RTI_PCL;
-         end
-
-         S_RTI_PCL: begin
-            if (bus_stb && bus_ack) begin
-               // Restore P (bit 5 always 1, B-flag preserved from CPU)
-               reg_p  <= {bus_rdata[7:6], 1'b1, reg_p[4], bus_rdata[3:0]};
-               reg_sp <= reg_sp + 1'b1;
-               // Pre-launch read PCL from new SP
-               pre_read({8'h01, reg_sp + 1'b1});
-               state  <= S_RTI_PCH;
-            end
-         end
-
-         S_RTI_PCH: begin
-            if (bus_stb && bus_ack) begin
-               if (opcode_reg == 8'h40 && !rti_got_pcl) begin
-                  // RTI first visit: this read is PCL
-                  temp_data   <= bus_rdata;
-                  rti_got_pcl <= 1'b1;
-                  reg_sp      <= reg_sp + 1'b1;
-                  pre_read({8'h01, reg_sp + 1'b1});
-                  // Stay in same state for PCH read
-               end else if (opcode_reg == 8'h40 && rti_got_pcl) begin
-                  // RTI second visit: this read is PCH
-                  reg_pc <= {bus_rdata, temp_data};
-                  pre_read({bus_rdata, temp_data});
-                  state  <= S_FETCH;
-               end else begin
-                  // RTS: temp_data = PCL (from RTS_PCH), this reads PCH
-                  reg_pc <= {bus_rdata, temp_data} + 16'h0001;
-                  pre_read({bus_rdata, temp_data} + 16'h0001);
-                  state  <= S_FETCH;
                end
             end
          end

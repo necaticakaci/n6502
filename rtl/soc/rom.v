@@ -15,7 +15,9 @@ module rom #(
    input  wire        rst_n,
 
    // Slave Interface
-   input  wire [15:0] bus_addr,
+   /* verilator lint_off UNUSEDSIGNAL */
+   input  wire [15:0] bus_addr,  // Upper bits decoded by the SoC
+   /* verilator lint_on UNUSEDSIGNAL */
    output reg  [ 7:0] bus_rdata,
    input  wire        bus_stb,
    output reg         bus_ack
@@ -24,13 +26,20 @@ module rom #(
    // ROM Array
    reg [7:0] memory [0:(1<<ADDR_WIDTH)-1];
 
+   // ROM holds the vectors, so it sits at the top of memory
+   localparam [15:0] BASE_ADDR = 16'hFFFF << ADDR_WIDTH;
+
    // ROM Initialization
    initial begin
       if (INIT_FILE != "") begin
          $readmemh(INIT_FILE, memory);
       end else begin
-         memory[(1<<ADDR_WIDTH)-4] = 8'h00; // Reset Vector Low  ($00)
-         memory[(1<<ADDR_WIDTH)-3] = 8'h80; // Reset Vector High ($80 -> $8000)
+         // No image: park the CPU in a JMP-to-self loop at the ROM base
+         memory[0] = 8'h4C;                           // JMP BASE_ADDR
+         memory[1] = BASE_ADDR[7:0];
+         memory[2] = BASE_ADDR[15:8];
+         memory[(1<<ADDR_WIDTH)-4] = BASE_ADDR[7:0];  // Reset Vector Low
+         memory[(1<<ADDR_WIDTH)-3] = BASE_ADDR[15:8]; // Reset Vector High
       end
    end
 

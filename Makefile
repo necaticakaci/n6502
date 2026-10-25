@@ -6,7 +6,9 @@
 #   make sim_alu           - Run ALU unit tests
 #   make sim_decoder       - Run Decoder unit tests
 #   make sim_core          - Run Core functional tests
+#   make sim_irq           - Run Interrupt (IRQ/NMI) tests
 #   make sim_dormann       - Run Klaus Dormann functional tests
+#   make sim_soc           - Run SoC tests
 #   make clean             - Remove build artifacts
 # ******************************************************************************
 
@@ -36,16 +38,16 @@ VFLAGS    = -g2005 -Wall -I $(RTL_CORE)
 # Targets
 # ******************************************************************************
 
-.PHONY: all clean lint sim_alu sim_decoder sim_core sim_dormann sim_soc
+.PHONY: all clean lint sim_alu sim_decoder sim_core sim_irq sim_dormann sim_soc
 
-all: lint sim_alu sim_decoder sim_core sim_dormann sim_soc
+all: lint sim_alu sim_decoder sim_core sim_irq sim_dormann sim_soc
 
 # Build directory
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 lint: $(BUILD_DIR)
-	$(VERILATOR) --lint-only -Wall -I$(RTL_CORE) $(CORE_SRC) > \
+	$(VERILATOR) --lint-only -Wall -I$(RTL_CORE) $(CORE_SRC) $(SOC_SRC) > \
 	$(BUILD_DIR)/lint.log 2>&1 || (cat $(BUILD_DIR)/lint.log; exit 1)
 
 sim_alu: $(BUILD_DIR)
@@ -62,6 +64,11 @@ sim_core: $(BUILD_DIR)
 	$(IVERILOG) $(VFLAGS) -o $(BUILD_DIR)/tb_core.vvp \
 		$(CORE_SRC) $(SIM_DIR)/tb_n6502_core.v
 	$(VVP) $(BUILD_DIR)/tb_core.vvp
+
+sim_irq: $(BUILD_DIR)
+	$(IVERILOG) $(VFLAGS) -o $(BUILD_DIR)/tb_irq.vvp \
+		$(CORE_SRC) $(SIM_DIR)/tb_n6502_irq.v
+	$(VVP) $(BUILD_DIR)/tb_irq.vvp
 
 sim_dormann: $(BUILD_DIR)
 	$(IVERILOG) $(VFLAGS) -o $(BUILD_DIR)/tb_dormann.vvp \

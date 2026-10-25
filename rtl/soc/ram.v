@@ -14,7 +14,9 @@ module ram #(
    input  wire        rst_n,
 
    // Slave Interface
-   input  wire [15:0] bus_addr,
+   /* verilator lint_off UNUSEDSIGNAL */
+   input  wire [15:0] bus_addr,  // Upper bits decoded by the SoC
+   /* verilator lint_on UNUSEDSIGNAL */
    input  wire [ 7:0] bus_wdata,
    output reg  [ 7:0] bus_rdata,
    input  wire        bus_we,

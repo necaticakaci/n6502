@@ -7,7 +7,7 @@ A small, FPGA optimized 6502 compatible CPU core written in Verilog-2005.
 - **No pin compatibility** — Core uses a generic bus interface that is not compatible with the original 6502 pin layout.
 - **No cycle accuracy** — Instruction timing differs from the original NMOS 6502. The n6502 is generally faster due to overlap fetch and pre-launch patterns. Not suitable for cycle-exact emulation.
 - **No BCD mode** — ADC/SBC in decimal mode behave as binary.
-- **No illegal opcodes** — Only the 151 legal 6502 opcodes are implemented. Illegal opcodes assert the `illegal` debug output.
+- **No illegal opcodes** — Only the 151 legal 6502 opcodes are implemented. An illegal opcode halts the core and asserts the `dbg_illegal` debug output until reset.
 
 ## Directory Structure
 
@@ -20,6 +20,7 @@ n6502/
 │   ├── tb_n6502_alu.v          ALU unit tests
 │   ├── tb_n6502_decoder.v      Decoder unit tests
 │   ├── tb_n6502_core.v         Core functional tests
+│   ├── tb_n6502_irq.v          Interrupt (IRQ/NMI) tests
 │   ├── tb_n6502_dormann.v      Klaus Dormann testbench
 │   └── tb_n6502_soc.v          SoC testbench
 ├── test/
@@ -48,6 +49,9 @@ make sim_decoder
 
 # Core functional test
 make sim_core
+
+# Interrupt (IRQ/NMI) test, zero-wait and 1-wait-state memory
+make sim_irq
 
 # Klaus Dormann test suite (takes ~20-25 minutes)
 make sim_dormann

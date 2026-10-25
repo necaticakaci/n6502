@@ -37,6 +37,7 @@ module tb_n6502_core;
    wire [ 7:0] dbg_y;
    wire [ 7:0] dbg_sp;
    wire [ 7:0] dbg_p;
+   wire        dbg_illegal;
 
    // ****************************************************************
    // Counters
@@ -63,7 +64,8 @@ module tb_n6502_core;
       .dbg_x      (dbg_x),
       .dbg_y      (dbg_y),
       .dbg_sp     (dbg_sp),
-      .dbg_p      (dbg_p)
+      .dbg_p      (dbg_p),
+      .dbg_illegal(dbg_illegal)
    );
 
    // ****************************************************************
@@ -169,7 +171,7 @@ module tb_n6502_core;
                         16'h800C: bus_rdata <= 8'h10; // $10
                         16'h800D: bus_rdata <= 8'h02; // $02
 
-                        16'h800E: bus_rdata <= 8'h81; // STA ($10,X)     (IZX: ptr at $13 = $00, $14 = $02 -> $0200 = $55)
+                        16'h800E: bus_rdata <= 8'h81; // STA ($10,X)     (IZX: ptr at $13/$14 = $55/$00 -> $0055 = $55)
                         16'h800F: bus_rdata <= 8'h10; // $10
 
                         16'h8010: bus_rdata <= 8'h91; // STA ($50),Y     (IZY: ptr at $50 = $20, $51 = $02 -> $0220 + Y = $0224 -> $55)
@@ -244,6 +246,8 @@ module tb_n6502_core;
                         16'h8039: bus_rdata <= 8'hA9; // LDA #$DD        (End of test)
                         16'h803A: bus_rdata <= 8'hDD; // $DD
 
+                        16'h803B: bus_rdata <= 8'h02; // Illegal opcode  (Core halts, dbg_illegal = 1)
+
                         // ************************************************
                         // SUBROUTINE AT $8040
                         // ************************************************
@@ -277,6 +281,19 @@ module tb_n6502_core;
    initial begin
       wk_ram[8'h26] = 8'h15; // Low byte  (8015)
       wk_ram[8'h27] = 8'h80; // High byte (8015)
+   end
+
+   // ****************************************************************
+   // ASL Carry Capture
+   // ****************************************************************
+   // CPX and RTI overwrite C later, so the final P cannot show the ASL
+   // result. Sample C once the JSR after ASL $42 has been fetched.
+   reg asl_carry;
+   initial begin
+      asl_carry = 1'b0;
+      wait (dbg_pc == 16'h8023); // ASL decoded, PC at JSR
+      wait (dbg_pc != 16'h8023); // JSR fetched, ASL complete
+      asl_carry = dbg_p[0];
    end
 
    // ****************************************************************
@@ -378,9 +395,15 @@ module tb_n6502_core;
             "ASL ZP: ZP_RAM[$42] = $4A",
             "ASL ZP: ZP_RAM[$42] != $4A");
 
-      check(dbg_p[0] == 1'b1,
+      check(asl_carry == 1'b1,
             "ASL Carry: C = 1",
             "ASL Carry: C != 1");
+
+      // Illegal opcode at $803B: core halts with PC past the opcode
+      repeat (20) @(posedge clk);
+      check(dbg_illegal && dbg_pc == 16'h803C,
+            "Illegal opcode: halted, flagged",
+            "Illegal opcode: not flagged");
 
       // ************************************************************
       // Summary

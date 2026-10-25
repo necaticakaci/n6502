@@ -18,7 +18,7 @@ module tb_n6502_dormann;
    // ****************************************************************
    // Configuration
    // ****************************************************************
-   localparam TRAP_THRESHOLD   = 1000;          // cycles at same PC to trap
+   localparam TRAP_THRESHOLD   = 1000;          // repeated fetches of same instruction to trap
    localparam PROGRESS_BITS    = 26;            // 2^26 = ~67M cycles between progress
    localparam SUCCESS_PC       = 16'h336D;      // Dormann success trap address
    localparam TIMEOUT_NS       = 5_000_000_000; // 500M cycles @ 100MHz
@@ -42,6 +42,7 @@ module tb_n6502_dormann;
    wire [ 7:0] dbg_y;
    wire [ 7:0] dbg_sp;
    wire [ 7:0] dbg_p;
+   wire        dbg_illegal;
 
    // ****************************************************************
    // 64KB System Memory
@@ -67,7 +68,8 @@ module tb_n6502_dormann;
       .dbg_x      (dbg_x),
       .dbg_y      (dbg_y),
       .dbg_sp     (dbg_sp),
-      .dbg_p      (dbg_p)
+      .dbg_p      (dbg_p),
+      .dbg_illegal(dbg_illegal)
    );
 
    // ****************************************************************
@@ -111,6 +113,16 @@ module tb_n6502_dormann;
    end
 
    // ****************************************************************
+   // Instruction Boundary
+   // ****************************************************************
+   // dbg_pc steps through operand bytes while an instruction executes,
+   // so a self-loop such as "BNE *" never holds it constant. Compare
+   // opcode fetch addresses instead. Must match n6502_control encoding.
+   localparam [4:0] S_FETCH = 5'd2;
+
+   wire insn_fetch = (uut.u_control.state == S_FETCH) && bus_stb && bus_ack;
+
+   // ****************************************************************
    // Monitoring & Trap Detection
    // ****************************************************************
    reg [31:0] cycle_count;
@@ -128,7 +140,7 @@ module tb_n6502_dormann;
          cycle_count <= cycle_count + 1;
 
          // *** Success Detection ***
-         if (dbg_pc == SUCCESS_PC) begin
+         if (insn_fetch && bus_addr == SUCCESS_PC) begin
             $display("");
             $display("****************************************");
             $display(" [PASS] KLAUS DORMANN 6502 TEST SUITE");
@@ -140,37 +152,55 @@ module tb_n6502_dormann;
             $finish;
          end
 
+         // *** Illegal Opcode Halt ***
+         // A halted core stops fetching, so the trap check below never fires
+         if (dbg_illegal) begin
+            $display("");
+            $display("****************************************");
+            $display(" [FAIL] Illegal opcode $%02X at $%04X",
+                      memory[dbg_pc - 16'd1], dbg_pc - 16'd1);
+            $display("****************************************");
+            $display(" Cycles:    %0d", cycle_count);
+            $display(" Test #:    $%02X", memory[16'h0200]);
+            $display(" CPU State: A=%02X X=%02X Y=%02X SP=%02X P=%02X",
+                      dbg_a, dbg_x, dbg_y, dbg_sp, dbg_p);
+            $display("****************************************");
+            $finish;
+         end
+
          // *** Self-Loop Trap Detection ***
-         if (dbg_pc == trap_pc) begin
-            trap_count <= trap_count + 1;
-            if (trap_count == TRAP_THRESHOLD) begin
-               $display("");
-               $display("****************************************");
-               $display(" [FAIL] CPU Trapped at PC = $%04X", dbg_pc);
-               $display("****************************************");
-               $display(" Cycles:    %0d", cycle_count);
-               $display(" Test #:    $%02X", memory[16'h0200]);
-               $display(" Opcode:    %02X %02X %02X",
-                         memory[dbg_pc], memory[dbg_pc+1], memory[dbg_pc+2]);
-               $display(" CPU State: A=%02X X=%02X Y=%02X SP=%02X P=%02X",
-                         dbg_a, dbg_x, dbg_y, dbg_sp, dbg_p);
-               $display("----------------------------------------");
-               $display(" Stack (SP+1..SP+8): %02X %02X %02X %02X %02X %02X %02X %02X",
-                         memory[{8'h01, dbg_sp+8'd1}], memory[{8'h01, dbg_sp+8'd2}],
-                         memory[{8'h01, dbg_sp+8'd3}], memory[{8'h01, dbg_sp+8'd4}],
-                         memory[{8'h01, dbg_sp+8'd5}], memory[{8'h01, dbg_sp+8'd6}],
-                         memory[{8'h01, dbg_sp+8'd7}], memory[{8'h01, dbg_sp+8'd8}]);
-               $display(" ZP Test Vars: $0D=%02X $0E=%02X $0F=%02X $10=%02X $11=%02X $12=%02X",
-                         memory[8'h0D], memory[8'h0E], memory[8'h0F],
-                         memory[8'h10], memory[8'h11], memory[8'h12]);
-               $display("****************************************");
-               $display(" Check 6502_functional_test.lst near PC=$%04X", dbg_pc);
-               $display("****************************************");
-               $finish;
+         if (insn_fetch) begin
+            if (bus_addr == trap_pc) begin
+               trap_count <= trap_count + 1;
+               if (trap_count == TRAP_THRESHOLD) begin
+                  $display("");
+                  $display("****************************************");
+                  $display(" [FAIL] CPU Trapped at PC = $%04X", trap_pc);
+                  $display("****************************************");
+                  $display(" Cycles:    %0d", cycle_count);
+                  $display(" Test #:    $%02X", memory[16'h0200]);
+                  $display(" Opcode:    %02X %02X %02X",
+                            memory[trap_pc], memory[trap_pc+1], memory[trap_pc+2]);
+                  $display(" CPU State: A=%02X X=%02X Y=%02X SP=%02X P=%02X",
+                            dbg_a, dbg_x, dbg_y, dbg_sp, dbg_p);
+                  $display("----------------------------------------");
+                  $display(" Stack (SP+1..SP+8): %02X %02X %02X %02X %02X %02X %02X %02X",
+                            memory[{8'h01, dbg_sp+8'd1}], memory[{8'h01, dbg_sp+8'd2}],
+                            memory[{8'h01, dbg_sp+8'd3}], memory[{8'h01, dbg_sp+8'd4}],
+                            memory[{8'h01, dbg_sp+8'd5}], memory[{8'h01, dbg_sp+8'd6}],
+                            memory[{8'h01, dbg_sp+8'd7}], memory[{8'h01, dbg_sp+8'd8}]);
+                  $display(" ZP Test Vars: $0D=%02X $0E=%02X $0F=%02X $10=%02X $11=%02X $12=%02X",
+                            memory[8'h0D], memory[8'h0E], memory[8'h0F],
+                            memory[8'h10], memory[8'h11], memory[8'h12]);
+                  $display("****************************************");
+                  $display(" Check 6502_functional_test.lst near PC=$%04X", trap_pc);
+                  $display("****************************************");
+                  $finish;
+               end
+            end else begin
+               trap_pc    <= bus_addr;
+               trap_count <= 0;
             end
-         end else begin
-            trap_pc    <= dbg_pc;
-            trap_count <= 0;
          end
 
          // *** Test Number Progress ***

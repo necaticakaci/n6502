@@ -29,7 +29,8 @@ module n6502_core (
    output wire [ 7:0] dbg_x,
    output wire [ 7:0] dbg_y,
    output wire [ 7:0] dbg_sp,
-   output wire [ 7:0] dbg_p
+   output wire [ 7:0] dbg_p,
+   output wire        dbg_illegal
 );
 
    // ************************************************************************
@@ -150,7 +151,8 @@ module n6502_core (
       .dbg_x               (dbg_x),
       .dbg_y               (dbg_y),
       .dbg_sp              (dbg_sp),
-      .dbg_p               (dbg_p)
+      .dbg_p               (dbg_p),
+      .dbg_illegal         (dbg_illegal)
    );
 
 endmodule

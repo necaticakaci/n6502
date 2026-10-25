@@ -6,7 +6,7 @@
 // n6502 CPU
 // Instruction Decoder
 //
-// Illegal/undocumented opcodes are flagged via the 
+// Illegal/undocumented opcodes are flagged via the
 // illegal output. BCD mode is not supported; SED/CLD
 // only affect the D flag in P register.
 // ******************************************************
@@ -52,6 +52,7 @@ module n6502_decoder (
       is_brk     = 1'b0;
       illegal    = 1'b0;
 
+      (* rom_style = "logic" *)
       case (opcode)
          // ****************************************************************
          // LDA — Load Accumulator

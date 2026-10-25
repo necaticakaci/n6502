@@ -33,7 +33,7 @@ module tb_n6502_soc;
    );
 
    // Override the ROM INIT_FILE parameter to load our blinky hex
-   defparam uut.u_rom.INIT_FILE = "test/programs/blinky.hex";
+   defparam uut.u_rom.INIT_FILE = "test/programs/blinky.vhex";
 
    // ****************************************************************
    // Clock (100 MHz)
